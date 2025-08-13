@@ -43,7 +43,9 @@ export const GET: RequestHandler = async ({ url, setHeaders }) => {
 			const parsed = parseFeed(xml);
 			const arts = itemsToArticles({ sourceId: s.id, sourceLabel: s.label, parsed });
 			return arts;
-		} catch (_e) {
+			// inside the limitConcurrency fetch for each source:
+		} catch (e) {
+			console.error('[rss]', s.label, s.url, e);
 			return [] as Article[];
 		}
 	});

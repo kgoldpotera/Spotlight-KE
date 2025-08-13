@@ -1,6 +1,8 @@
 import { getCache } from '$lib/server/cache';
 
-const UA = 'SPOTLIGHT-KE/0.1 (+https://spotlight-ke.local)';
+const UA =
+	'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) ' +
+	'Chrome/124.0 Safari/537.36 SPOTLIGHT-KE/0.1';
 
 export async function fetchFeed(url: string, ttlMs = 300_000): Promise<string> {
 	const cache = getCache();
@@ -10,38 +12,43 @@ export async function fetchFeed(url: string, ttlMs = 300_000): Promise<string> {
 	const cachedBody = await cache.get<string>(bodyKey);
 	const meta = (await cache.get<{ etag?: string; lastModified?: string }>(metaKey)) ?? {};
 
+	const headers: Record<string, string> = {
+		'user-agent': UA,
+		accept: 'application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.8',
+		'accept-language': 'en-KE,en;q=0.9'
+	};
+	if (meta.etag) headers['if-none-match'] = meta.etag;
+	if (meta.lastModified) headers['if-modified-since'] = meta.lastModified;
+
+	// hard timeout (10s)
+	const controller = new AbortController();
+	const timer = setTimeout(() => controller.abort(), 10_000);
+
 	try {
 		const res = await fetch(url, {
-			headers: {
-				'user-agent': UA,
-				...(meta.etag ? { 'if-none-match': meta.etag } : {}),
-				...(meta.lastModified ? { 'if-modified-since': meta.lastModified } : {})
-			},
-			redirect: 'follow'
+			headers,
+			redirect: 'follow',
+			signal: controller.signal
 		});
 
-		if (res.status === 304 && cachedBody) {
-			return cachedBody;
-		}
+		clearTimeout(timer);
+
+		if (res.status === 304 && cachedBody) return cachedBody;
 		if (!res.ok) {
 			if (cachedBody) return cachedBody;
 			throw new Error(`Feed fetch failed ${res.status} for ${url}`);
 		}
 
-		const ct = res.headers.get('content-type') || '';
-		if (!/xml|rss|atom|application\/.*xml|text\/xml/i.test(ct)) {
-			// Some feeds lie; still try to read text
-		}
 		const text = await res.text();
-
 		const etag = res.headers.get('etag') || undefined;
 		const lastModified = res.headers.get('last-modified') || undefined;
 
 		await cache.set(bodyKey, text, Math.max(5, Math.floor(ttlMs / 1000)));
-		await cache.set(metaKey, { etag, lastModified }, 24 * 60 * 60); // keep meta for a day
+		await cache.set(metaKey, { etag, lastModified }, 24 * 60 * 60);
 
 		return text;
 	} catch (err) {
+		clearTimeout(timer);
 		if (cachedBody) return cachedBody;
 		throw err;
 	}
