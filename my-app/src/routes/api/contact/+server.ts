@@ -1,8 +1,9 @@
+// src/routes/api/contact/+server.ts
 import type { RequestHandler } from './$types';
 import { Resend } from 'resend';
 import { env } from '$env/dynamic/private';
 
-function escapeHtml(s: string) {
+function esc(s: string) {
 	return s
 		.replaceAll('&', '&amp;')
 		.replaceAll('<', '&lt;')
@@ -14,11 +15,10 @@ function escapeHtml(s: string) {
 export const POST: RequestHandler = async ({ request }) => {
 	const ct = request.headers.get('content-type') ?? '';
 	let payload: Record<string, string> = {};
-	if (ct.includes('multipart/form-data') || ct.includes('application/x-www-form-urlencoded')) {
+	if (ct.includes('form')) {
 		const fd = await request.formData();
-		if ((fd.get('company') as string)?.trim()) {
+		if ((fd.get('company') as string)?.trim())
 			return new Response(JSON.stringify({ ok: true }), { status: 200 });
-		}
 		payload = {
 			name: (fd.get('name') as string) ?? '',
 			email: (fd.get('email') as string) ?? '',
@@ -32,7 +32,6 @@ export const POST: RequestHandler = async ({ request }) => {
 
 	const { name = '', email = '', subject = '', message = '', consent = '' } = payload;
 	if (
-		!name ||
 		name.length < 2 ||
 		!email.includes('@') ||
 		!subject ||
@@ -43,24 +42,24 @@ export const POST: RequestHandler = async ({ request }) => {
 		return new Response(JSON.stringify({ error: 'Invalid input' }), { status: 400 });
 	}
 
+	const key = env.RESEND_API_KEY;
 	const from = env.CONTACT_FROM;
 	const to = (env.CONTACT_TO ?? '')
 		.split(',')
 		.map((s) => s.trim())
 		.filter(Boolean);
-	const key = env.RESEND_API_KEY;
 
-	if (!from || !to.length || !key) {
-		// Log-only dev fallback
-		console.log('[contact]', {
+	// If not configured yet, don’t hard-fail during dev:
+	if (!key || !from || !to.length) {
+		console.log('[contact:dev-fallback]', {
 			from,
 			to,
 			name,
 			email,
 			subject,
-			message: message.slice(0, 200) + '…'
+			snippet: message.slice(0, 120)
 		});
-		return new Response(JSON.stringify({ ok: true, note: 'email not configured' }), {
+		return new Response(JSON.stringify({ ok: true, note: 'Email not configured (dev fallback)' }), {
 			status: 200
 		});
 	}
@@ -69,14 +68,20 @@ export const POST: RequestHandler = async ({ request }) => {
 	const html = `
     <div style="font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; line-height:1.5;">
       <h2>New Contact Request</h2>
-      <p><strong>Name:</strong> ${escapeHtml(name)}</p>
-      <p><strong>Email:</strong> ${escapeHtml(email)}</p>
-      <p><strong>Subject:</strong> ${escapeHtml(subject)}</p>
+      <p><strong>Name:</strong> ${esc(name)}</p>
+      <p><strong>Email:</strong> ${esc(email)}</p>
+      <p><strong>Subject:</strong> ${esc(subject)}</p>
       <p><strong>Message:</strong></p>
-      <pre style="white-space: pre-wrap; background:#f6f6f6; padding:12px; border-radius:8px;">${escapeHtml(message)}</pre>
+      <pre style="white-space: pre-wrap; background:#f6f6f6; padding:12px; border-radius:8px;">${esc(message)}</pre>
     </div>
   `;
-	const text = `New Contact Request\nName: ${name}\nEmail: ${email}\nSubject: ${subject}\n\n${message}\n`;
+	const text = `New Contact Request
+Name: ${name}
+Email: ${email}
+Subject: ${subject}
+
+${message}
+`;
 
 	await resend.emails.send({
 		from,
