@@ -5,6 +5,7 @@ import { GLOBAL_SOURCES } from '$lib/server/sources/global';
 import { fetchFeed } from '$lib/server/rss/fetchFeed';
 import { parseFeed } from '$lib/server/rss/parse';
 import { itemsToArticles } from '$lib/server/rss/normalize';
+import { resolveOGImage } from '$lib/server/enrich/ogImage';
 
 function limitConcurrency<T, R>(items: T[], n: number, fn: (x: T) => Promise<R>) {
 	const queue = [...items];
@@ -36,21 +37,18 @@ export const GET: RequestHandler = async ({ url, setHeaders }) => {
 		.filter((s) => s.active)
 		.filter((s) => (scope === 'all' ? true : s.scope === scope));
 
-	// fetch + parse in parallel (limited)
 	const batches = await limitConcurrency(sources, 5, async (s) => {
 		try {
 			const xml = await fetchFeed(s.url, s.ttlMs ?? 300_000);
 			const parsed = parseFeed(xml);
 			const arts = itemsToArticles({ sourceId: s.id, sourceLabel: s.label, parsed });
 			return arts;
-			// inside the limitConcurrency fetch for each source:
 		} catch (e) {
 			console.error('[rss]', s.label, s.url, e);
 			return [] as Article[];
 		}
 	});
 
-	// flatten
 	const all = ([] as Article[]).concat(...batches);
 
 	// dedupe by URL
@@ -59,15 +57,19 @@ export const GET: RequestHandler = async ({ url, setHeaders }) => {
 
 	let items = Array.from(byUrl.values());
 
-	// filter by category if provided
 	if (category) items = items.filter((i) => i.category === category);
 
 	// sort newest → oldest
 	items.sort((a, b) => Date.parse(b.publishedAt) - Date.parse(a.publishedAt));
 
-	const total = items.length;
+	// 🔎 enrich top N items that are missing image
+	const toEnrich = items.filter((i) => !i.image).slice(0, 32);
+	await limitConcurrency(toEnrich, 6, async (it) => {
+		const img = await resolveOGImage(it.url);
+		if (img) it.image = img;
+	});
 
-	// paginate
+	const total = items.length;
 	const start = (page - 1) * size;
 	const paged = items.slice(start, start + size);
 

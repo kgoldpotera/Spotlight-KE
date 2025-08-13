@@ -3,10 +3,23 @@
 </script>
 
 {#if item}
-  <a class="block rounded-2xl border p-6 no-underline"
+  <a class="block rounded-2xl border no-underline overflow-hidden"
      style="border-color: var(--border); background: var(--background-alt)"
      href={item.url} rel="noopener noreferrer" target="_blank">
-    <h2 class="text-2xl font-semibold">{item.title}</h2>
-    {#if item.excerpt}<p class="mt-2 opacity-80">{item.excerpt}</p>{/if}
+    {#if item.image}
+      <div style="aspect-ratio: 16 / 9;" class="w-full overflow-hidden">
+        <img
+          src={item.image}
+          alt={item.title}
+          loading="eager"
+          decoding="async"
+          class="w-full h-full object-cover"
+          sizes="(min-width: 1024px) 960px, 100vw" />
+      </div>
+    {/if}
+    <div class="p-6">
+      <h2 class="text-3xl font-semibold">{item.title}</h2>
+      {#if item.excerpt}<p class="mt-2 opacity-80">{item.excerpt}</p>{/if}
+    </div>
   </a>
 {/if}

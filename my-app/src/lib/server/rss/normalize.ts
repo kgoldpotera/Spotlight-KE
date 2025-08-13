@@ -7,10 +7,10 @@ import { toISO } from '$lib/utils/dates';
 
 export function itemsToArticles(opts: {
 	sourceId: string; // e.g. 'rss:nation'
-	sourceLabel: string; // 'Nation'
+	sourceLabel: string; // 'Nation' (kept for future badges)
 	parsed: ParsedItem[];
 }): Article[] {
-	const { sourceId, sourceLabel, parsed } = opts;
+	const { sourceId, parsed } = opts;
 
 	return parsed
 		.map((p) => {
@@ -22,7 +22,6 @@ export function itemsToArticles(opts: {
 
 			const text = p.description ? htmlToText(p.description) : '';
 			const excerpt = text ? summarize(text, 260) : null;
-
 			const cat = classifyCategory(`${title} ${text}`) ?? null;
 
 			return {
@@ -30,7 +29,7 @@ export function itemsToArticles(opts: {
 				source: sourceId as any,
 				title,
 				url,
-				image: null,
+				image: p.imageUrl ?? null, // <- use feed image if provided
 				excerpt,
 				category: cat,
 				publishedAt: toISO(p.publishedAt ?? Date.now()),
