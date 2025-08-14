@@ -20,6 +20,7 @@ export interface Article {
 	category?: Category | null;
 	publishedAt: string; // ISO
 	author?: string | null;
+	sourceName?: string | null;
 }
 
 export interface NewsResponse {
@@ -35,4 +36,14 @@ export interface FeedSource {
 	active: boolean;
 	ttlMs?: number;
 	scope: Exclude<Scope, 'all'>;
+}
+
+export interface AdSlot {
+	kind: 'ad';
+	id: string; // e.g. 'ad-home-1'
+	label?: string; // e.g. 'Sponsored'
+}
+export type ContentItem = Article | AdSlot;
+export function isAd(x: ContentItem): x is AdSlot {
+	return (x as any)?.kind === 'ad';
 }

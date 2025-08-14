@@ -6,17 +6,16 @@ import { summarize } from '$lib/utils/summarize';
 import { toISO } from '$lib/utils/dates';
 
 export function itemsToArticles(opts: {
-	sourceId: string; // e.g. 'rss:nation'
-	sourceLabel: string; // 'Nation' (kept for future badges)
+	sourceId: string;
+	sourceLabel: string; // we’ll surface this as sourceName
 	parsed: ParsedItem[];
 }): Article[] {
-	const { sourceId, parsed } = opts;
+	const { sourceId, sourceLabel, parsed } = opts;
 
 	return parsed
 		.map((p) => {
 			const url = (p.link || '').trim();
 			if (!url) return null;
-
 			const title = (p.title || '').trim();
 			if (!title) return null;
 
@@ -27,9 +26,10 @@ export function itemsToArticles(opts: {
 			return {
 				id: `rss:${hash(url)}`,
 				source: sourceId as any,
+				sourceName: sourceLabel, // ← add
 				title,
 				url,
-				image: p.imageUrl ?? null, // <- use feed image if provided
+				image: p.imageUrl ?? null,
 				excerpt,
 				category: cat,
 				publishedAt: toISO(p.publishedAt ?? Date.now()),
@@ -38,6 +38,7 @@ export function itemsToArticles(opts: {
 		})
 		.filter(Boolean) as Article[];
 }
+
 
 function hash(s: string): string {
 	let h = 2166136261 >>> 0;

@@ -20,6 +20,9 @@
     <div class="p-6">
       <h2 class="text-3xl font-semibold">{item.title}</h2>
       {#if item.excerpt}<p class="mt-2 opacity-80">{item.excerpt}</p>{/if}
+      <div class="text-xs opacity-70">{item.sourceName ?? item.source}</div>
+
     </div>
+    
   </a>
 {/if}
