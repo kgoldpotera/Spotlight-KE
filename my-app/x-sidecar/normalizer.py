@@ -113,7 +113,7 @@ def article_from_tweet(t: Any, handle: str, url: str) -> Dict[str, Any]:
 
     return {
         "id": f"x:{handle}:{getattr(t,'id', None)}",
-        "source": f"x/{handle}",
+        "source": f"x:{handle.lower()}",
         "sourceName": f"{handle} (X)",
         "title": title or f"Post by @{handle}",
         "url": url,

@@ -1,152 +1,138 @@
-import { getCache } from '$lib/server/cache';
+// Robust OG/Twitter/JSON-LD image resolver with TTL cache + screenshot fallback
+const CACHE = new Map<string, { value: string | null; exp: number }>();
+const TTL_MS = 1000 * 60 * 60 * 6; // 6h
 
-const UA =
-	'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36 SPOTLIGHT-KE/0.1';
-
-const HTML_TIMEOUT_MS = 8000;
-const MAX_BYTES = 400_000; // read at most ~400KB; enough for <head>
-
-export async function resolveOGImage(articleUrl: string): Promise<string | null> {
-	const cache = getCache();
-	const key = `og:${articleUrl}`;
-	const cached = await cache.get<string | null>(key);
-	if (cached !== undefined) return cached ?? null; // cached null means "no image"
-
+function abs(base: string, maybe?: string | null) {
+	if (!maybe) return null;
 	try {
-		const html = await fetchPartialHtml(articleUrl);
-		if (!html) {
-			await cache.set(key, null, 6 * 60 * 60);
-			return null;
-		}
-
-		const base = new URL(articleUrl);
-		const cand =
-			fromMeta(html, /<meta[^>]+property=["']og:image["'][^>]*>/i) ||
-			fromMeta(html, /<meta[^>]+name=["']og:image["'][^>]*>/i) ||
-			fromMeta(html, /<meta[^>]+property=["']twitter:image["'][^>]*>/i) ||
-			fromLink(html, /<link[^>]+rel=["']image_src["'][^>]*>/i) ||
-			fromJsonLd(html);
-
-		if (!cand) {
-			await cache.set(key, null, 6 * 60 * 60);
-			return null;
-		}
-
-		const abs = toAbsolute(cand, base);
-		if (!abs) {
-			await cache.set(key, null, 6 * 60 * 60);
-			return null;
-		}
-
-		// Optional: quick HEAD to ensure it’s an image (ignore errors)
-		try {
-			const head = await fetch(abs, { method: 'HEAD' });
-			const ct = head.headers.get('content-type') || '';
-			if (ct && !/^image\//i.test(ct)) {
-				// not an image; keep URL anyway (some hosts block HEAD)
-			}
-		} catch {
-			// ignore
-		}
-
-		await cache.set(key, abs, 24 * 60 * 60);
-		return abs;
-	} catch {
-		await cache.set(key, null, 6 * 60 * 60);
-		return null;
-	}
-}
-
-async function fetchPartialHtml(url: string): Promise<string | null> {
-	const controller = new AbortController();
-	const t = setTimeout(() => controller.abort(), HTML_TIMEOUT_MS);
-	try {
-		const res = await fetch(url, {
-			headers: {
-				'user-agent': UA,
-				accept: 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.8'
-			},
-			redirect: 'follow',
-			signal: controller.signal
-		});
-		if (!res.ok) return null;
-
-		// Read only first MAX_BYTES
-		if (!res.body) return await res.text();
-		const reader = res.body.getReader();
-		const chunks: Uint8Array[] = [];
-		let total = 0;
-		while (true) {
-			const { value, done } = await reader.read();
-			if (done) break;
-			if (value) {
-				chunks.push(value);
-				total += value.byteLength;
-				if (total >= MAX_BYTES) break;
-			}
-		}
-		return new TextDecoder().decode(concat(chunks, total));
+		return new URL(maybe, base).href;
 	} catch {
 		return null;
-	} finally {
-		clearTimeout(t);
 	}
 }
 
-function concat(chunks: Uint8Array[], total: number) {
-	const out = new Uint8Array(total);
-	let o = 0;
-	for (const c of chunks) {
-		out.set(c, o);
-		o += c.byteLength;
-	}
-	return out;
-}
-
-function fromMeta(html: string, tagRe: RegExp): string | null {
-	const m = html.match(tagRe);
-	if (!m) return null;
-	const tag = m[0];
-	const cm = tag.match(/\scontent=["']([^"']+)["']/i);
-	return cm ? cm[1] : null;
-}
-
-function fromLink(html: string, tagRe: RegExp): string | null {
-	const m = html.match(tagRe);
-	if (!m) return null;
-	const tag = m[0];
-	const hm = tag.match(/\shref=["']([^"']+)["']/i);
-	return hm ? hm[1] : null;
-}
-
-function fromJsonLd(html: string): string | null {
-	const scripts = html.match(
-		/<script[^>]+type=["']application\/ld\+json["'][^>]*>[\s\S]*?<\/script>/gi
+function meta(html: string, nameOrProp: string) {
+	// <meta property="og:image" content="..."> or <meta name="twitter:image" ...>
+	const re = new RegExp(
+		`<meta[^>]+(?:property|name)=["']${nameOrProp}["'][^>]*content=["']([^"']+)["']`,
+		'i'
 	);
-	if (!scripts) return null;
-	for (const s of scripts) {
-		const json = s.replace(/^<script[^>]*>/i, '').replace(/<\/script>$/i, '');
-		try {
-			const obj = JSON.parse(json);
-			// Look for .image or .image.url or NewsArticle.image
-			const img =
-				obj?.image?.url ||
-				(Array.isArray(obj?.image) ? obj.image[0] : obj?.image) ||
-				obj?.thumbnailUrl ||
-				obj?.primaryImageOfPage?.url;
-			if (typeof img === 'string' && img) return img;
-		} catch {
-			/* ignore json errors */
-		}
-	}
+	const m = html.match(re);
+	return m ? m[1] : null;
+}
+
+function linkRel(html: string, rel: string) {
+	const re = new RegExp(`<link[^>]+rel=["']${rel}["'][^>]*href=["']([^"']+)["']`, 'i');
+	const m = html.match(re);
+	return m ? m[1] : null;
+}
+
+function firstStr(v: any): string | null {
+	if (!v) return null;
+	if (typeof v === 'string') return v;
+	if (Array.isArray(v)) return firstStr(v[0]);
+	if (typeof v === 'object') return firstStr(v.url || v.contentUrl || v.thumbnailUrl);
 	return null;
 }
 
-function toAbsolute(u: string, base: URL): string | null {
+function imagesFromJsonLD(html: string): string[] {
+	const imgs: string[] = [];
+	const re = /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+	let m: RegExpExecArray | null;
+	while ((m = re.exec(html))) {
+		try {
+			const data = JSON.parse(m[1]);
+			const arr = Array.isArray(data) ? data : [data];
+			for (const node of arr) {
+				const t = (node?.['@type'] || node?.type || '').toString().toLowerCase();
+				if (!t || !/article|news|blog|creativework|webpage/.test(t)) {
+					// still try generic nodes for image fields
+				}
+				const candidate =
+					firstStr(node?.image) ||
+					firstStr(node?.thumbnailUrl) ||
+					firstStr(node?.primaryImageOfPage) ||
+					firstStr(node?.associatedMedia);
+				if (candidate) imgs.push(candidate);
+			}
+		} catch {
+			/* ignore bad JSON-LD */
+		}
+	}
+	return imgs;
+}
+
+function screenshot(url: string, w = 1200) {
+	// Free screenshot fallback (no key). Fine for dev; replace if you want your own service later.
+	return `https://s0.wp.com/mshots/v1/${encodeURIComponent(url)}?w=${w}`;
+}
+
+export async function resolveOgImage(url: string, timeoutMs = 9000): Promise<string | null> {
+	const now = Date.now();
+	const hit = CACHE.get(url);
+	if (hit && hit.exp > now) return hit.value;
+
+	const ctrl = new AbortController();
+	const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+
 	try {
-		if (/^data:/i.test(u)) return null;
-		return new URL(u, base).toString();
+		const res = await fetch(url, {
+			redirect: 'follow',
+			signal: ctrl.signal,
+			headers: {
+				'User-Agent':
+					'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36',
+				Accept: 'text/html,application/xhtml+xml'
+			}
+		});
+		const html = await res.text();
+
+		// 1) Common metas
+		const keys = [
+			'og:image:secure_url',
+			'og:image:url',
+			'og:image',
+			'twitter:image:src',
+			'twitter:image'
+		];
+		for (const k of keys) {
+			const v = abs(url, meta(html, k));
+			if (v) {
+				CACHE.set(url, { value: v, exp: now + TTL_MS });
+				return v;
+			}
+		}
+
+		// 2) <link rel="image_src">, parsely, etc.
+		const rel = abs(url, linkRel(html, 'image_src'));
+		if (rel) {
+			CACHE.set(url, { value: rel, exp: now + TTL_MS });
+			return rel;
+		}
+		const parsely = abs(url, meta(html, 'parsely-image'));
+		if (parsely) {
+			CACHE.set(url, { value: parsely, exp: now + TTL_MS });
+			return parsely;
+		}
+
+		// 3) JSON-LD
+		const ld = imagesFromJsonLD(html)
+			.map((s) => abs(url, s))
+			.find(Boolean);
+		if (ld) {
+			CACHE.set(url, { value: ld!, exp: now + TTL_MS });
+			return ld!;
+		}
+
+		// 4) Last-resort screenshot
+		const shot = screenshot(url);
+		CACHE.set(url, { value: shot, exp: now + TTL_MS / 2 });
+		return shot;
 	} catch {
+		// short negative cache
+		CACHE.set(url, { value: null, exp: now + TTL_MS / 4 });
 		return null;
+	} finally {
+		clearTimeout(timer);
 	}
 }
