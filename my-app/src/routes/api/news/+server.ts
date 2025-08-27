@@ -5,7 +5,7 @@ import { GLOBAL_SOURCES } from '$lib/server/sources/global';
 import { fetchFeed } from '$lib/server/rss/fetchFeed';
 import { parseFeed } from '$lib/server/rss/parse';
 import { itemsToArticles } from '$lib/server/rss/normalize';
-import { resolveOGImage } from '$lib/server/enrich/ogImage';
+import { resolveOgImage } from '$lib/server/enrich/ogImage';
 
 function limitConcurrency<T, R>(items: T[], n: number, fn: (x: T) => Promise<R>) {
 	const queue = [...items];
@@ -65,7 +65,7 @@ export const GET: RequestHandler = async ({ url, setHeaders }) => {
 	// 🔎 enrich top N items that are missing image
 	const toEnrich = items.filter((i) => !i.image).slice(0, 32);
 	await limitConcurrency(toEnrich, 6, async (it) => {
-		const img = await resolveOGImage(it.url);
+		const img = await resolveOgImage(it.url);
 		if (img) it.image = img;
 	});
 
