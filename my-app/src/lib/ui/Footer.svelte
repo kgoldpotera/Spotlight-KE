@@ -45,6 +45,14 @@
       msg = message;
     }
   }
+
+  function overlayKey(e: KeyboardEvent) {
+    // Close on Escape, Enter, or Space when overlay has focus
+    if (e.key === 'Escape' || e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      closeForm();
+    }
+  }
 </script>
 
 <footer class="footer">
@@ -75,12 +83,19 @@
   <div class="copy">© {new Date().getFullYear()} SPOTLIGHT-KE • All rights reserved.</div>
 
   {#if open}
-    <!-- dim -->
-    <div class="overlay" on:click|self={closeForm}></div>
+    <!-- Dim overlay (now keyboard accessible) -->
+    <div
+      class="overlay"
+      role="button"
+      tabindex="0"
+      aria-label="Close contact dialog"
+      on:click|self={closeForm}
+      on:keydown={overlayKey}
+    ></div>
 
-    <!-- centered modal -->
+    <!-- Centered modal -->
     <div class="modal">
-      <section
+      <div
         id="contact-dialog"
         class="card"
         role="dialog"
@@ -121,7 +136,7 @@
 
           <div class="field">
             <label for="message">Message</label>
-            <textarea id="message" name="message" required minlength="10" maxlength="4000" rows="5" />
+            <textarea id="message" name="message" required minlength="10" maxlength="4000" rows="5"></textarea>
           </div>
 
           <div class="check">
@@ -139,7 +154,7 @@
             {/if}
           </div>
         </form>
-      </section>
+      </div>
     </div>
   {/if}
 </footer>
@@ -171,7 +186,7 @@
     background: none;
     border: none;
     padding: 0;
-    margin: 0 0 0 4px;
+    margin-left: 4px;
     color: #f2c078;           /* sunset highlight */
     font-weight: 700;
     cursor: pointer;

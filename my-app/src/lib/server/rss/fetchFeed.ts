@@ -1,55 +1,55 @@
-import { getCache } from '$lib/server/cache';
+// src/lib/server/rss/fetchFeed.ts
+import { parseFeed } from './parse';
 
 const UA =
-	'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) ' +
-	'Chrome/124.0 Safari/537.36 SPOTLIGHT-KE/0.1';
+	'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
 
-export async function fetchFeed(url: string, ttlMs = 300_000): Promise<string> {
-	const cache = getCache();
-	const bodyKey = `feed:body:${url}`;
-	const metaKey = `feed:meta:${url}`;
+const COMMON_HEADERS = {
+	'User-Agent': UA,
+	Accept:
+		'application/rss+xml, application/atom+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.7',
+	'Accept-Language': 'en,en-GB;q=0.9'
+};
 
-	const cachedBody = await cache.get<string>(bodyKey);
-	const meta = (await cache.get<{ etag?: string; lastModified?: string }>(metaKey)) ?? {};
-
-	const headers: Record<string, string> = {
-		'user-agent': UA,
-		accept: 'application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.8',
-		'accept-language': 'en-KE,en;q=0.9'
-	};
-	if (meta.etag) headers['if-none-match'] = meta.etag;
-	if (meta.lastModified) headers['if-modified-since'] = meta.lastModified;
-
-	// hard timeout (10s)
-	const controller = new AbortController();
-	const timer = setTimeout(() => controller.abort(), 10_000);
-
-	try {
-		const res = await fetch(url, {
-			headers,
-			redirect: 'follow',
-			signal: controller.signal
-		});
-
-		clearTimeout(timer);
-
-		if (res.status === 304 && cachedBody) return cachedBody;
-		if (!res.ok) {
-			if (cachedBody) return cachedBody;
-			throw new Error(`Feed fetch failed ${res.status} for ${url}`);
+export async function fetchFeed(url: string, retries = 1) {
+	let lastErr: unknown;
+	for (let attempt = 0; attempt <= retries; attempt++) {
+		try {
+			const res = await fetch(url, {
+				redirect: 'follow',
+				signal: AbortSignal.timeout(12000),
+				headers: COMMON_HEADERS
+			});
+			if (!res.ok) {
+				throw new Error(`Feed fetch failed ${res.status} for ${url}`);
+			}
+			const xml = await res.text();
+			return parseFeed(xml, url);
+		} catch (err) {
+			lastErr = err;
+			// small backoff then retry
+			await new Promise((r) => setTimeout(r, 350 * (attempt + 1)));
 		}
-
-		const text = await res.text();
-		const etag = res.headers.get('etag') || undefined;
-		const lastModified = res.headers.get('last-modified') || undefined;
-
-		await cache.set(bodyKey, text, Math.max(5, Math.floor(ttlMs / 1000)));
-		await cache.set(metaKey, { etag, lastModified }, 24 * 60 * 60);
-
-		return text;
-	} catch (err) {
-		clearTimeout(timer);
-		if (cachedBody) return cachedBody;
-		throw err;
 	}
+	throw lastErr;
+}
+
+// Run tasks with simple concurrency control
+export async function runLimited<T>(n: number, items: T[], fn: (item: T) => Promise<unknown>) {
+	const queue = [...items];
+	const workers: Promise<void>[] = [];
+	const results: unknown[] = [];
+	for (let i = 0; i < Math.min(n, queue.length); i++) {
+		workers.push(
+			(async function worker() {
+				while (queue.length) {
+					const item = queue.shift()!;
+					const out = await fn(item).catch(() => undefined);
+					results.push(out);
+				}
+			})()
+		);
+	}
+	await Promise.all(workers);
+	return results;
 }

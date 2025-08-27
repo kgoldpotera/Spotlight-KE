@@ -1,139 +1,176 @@
+// src/lib/server/rss/parse.ts
 import { XMLParser } from 'fast-xml-parser';
 
-export interface ParsedItem {
+export type FeedItem = {
 	title: string;
 	link: string;
-	publishedAt?: string;
-	description?: string;
-	author?: string;
-	imageUrl?: string; // <- NEW
-	rawHtml?: string; // <- optional raw (desc/content) for img extraction
-}
+	publishedAt?: string | null;
+	excerpt?: string | null;
+	image?: string | null;
+	source?: string | null;
+};
 
 const parser = new XMLParser({
 	ignoreAttributes: false,
-	attributeNamePrefix: '@_',
-	textNodeName: '#text',
+	attributeNamePrefix: '',
+	allowBooleanAttributes: true,
+	// tolerate imperfect markup
+	parseTagValue: true,
+	parseAttributeValue: true,
 	trimValues: true
 });
 
-export function parseFeed(xml: string): ParsedItem[] {
-	const root = parser.parse(xml);
+export function parseFeed(xml: string): FeedItem[] {
+	const doc = parser.parse(xml) as unknown;
 
 	// RSS 2.0
-	if (root?.rss?.channel?.item) {
-		const items = Array.isArray(root.rss.channel.item)
-			? root.rss.channel.item
-			: [root.rss.channel.item];
-		return items.map(fromRssItem).filter(valid);
+	const rssCh = (doc as Record<string, unknown>)?.rss as
+		| { channel?: { title?: unknown; item?: unknown[] | unknown } }
+		| undefined;
+
+	if (rssCh?.channel?.item) {
+		const ch = rssCh.channel;
+		const sourceTitle = getText(ch.title) ?? null;
+		const items = Array.isArray(ch.item) ? ch.item : [ch.item];
+		return items.map((it) => normalizeRssItem(it as unknown, sourceTitle));
 	}
 
 	// Atom
-	if (root?.feed?.entry) {
-		const entries = Array.isArray(root.feed.entry) ? root.feed.entry : [root.feed.entry];
-		return entries.map(fromAtomEntry).filter(valid);
-	}
+	const feed = (doc as Record<string, unknown>)?.feed as
+		| { title?: unknown; entry?: unknown[] | unknown }
+		| undefined;
 
-	// Some feeds nest differently
-	const channel = root?.channel;
-	if (channel?.item) {
-		const items = Array.isArray(channel.item) ? channel.item : [channel.item];
-		return items.map(fromRssItem).filter(valid);
+	if (feed?.entry) {
+		const sourceTitle = getText(feed.title) ?? null;
+		const entries = Array.isArray(feed.entry) ? feed.entry : [feed.entry];
+		return entries.map((it) => normalizeAtomEntry(it as unknown, sourceTitle));
 	}
 
 	return [];
 }
 
-function valid(x: ParsedItem | null | undefined): x is ParsedItem {
-	return !!x && !!x.title && !!x.link;
+// ------- helpers -------
+
+function getText(x: unknown): string | null {
+	if (x == null) return null;
+	if (typeof x === 'string' || typeof x === 'number' || typeof x === 'boolean') {
+		return String(x);
+	}
+	if (typeof x === 'object') {
+		const rec = x as Record<string, unknown>;
+		if ('#text' in rec) return String(rec['#text']);
+		if ('_text' in rec) return String(rec['_text']);
+		if ('$' in rec) return String(rec['$']);
+	}
+	// fallback — some feeds dump objects here; stringify but keep it predictable
+	return null;
 }
 
-function fromRssItem(it: any): ParsedItem {
-	const title = str(it.title);
-	const link = str(it.link) || str(it?.guid?.['#text']) || '';
-
-	// Dates/author
-	const publishedAt =
-		str(it.pubDate) || str(it?.['dc:date']) || str(it?.['dc:date.issued']) || undefined;
-	const author = str(it?.author) || str(it?.['dc:creator']) || undefined;
-
-	// Primary bodies
-	const descriptionHtml = str(it?.description);
-	const contentHtml = str(it?.['content:encoded']);
-
-	// Image from RSS media tags
-	const enclosureUrl = str(it?.enclosure?.['@_url']);
-	const mediaContent = arr(it?.['media:content']).map((m: any) => str(m?.['@_url'] || m?.url));
-	const mediaThumbs = arr(it?.['media:thumbnail']).map((m: any) => str(m?.['@_url'] || m?.url));
-	const imageFromMedia = pickFirst([enclosureUrl, ...mediaContent, ...mediaThumbs].filter(Boolean));
-
-	// Fallback: first <img src="..."> in description/content
-	const imageFromHtml = pickImageFromHtml(descriptionHtml) || pickImageFromHtml(contentHtml);
-
-	return {
-		title,
-		link,
-		publishedAt,
-		description: descriptionHtml || contentHtml || undefined,
-		author,
-		imageUrl: imageFromMedia || imageFromHtml || undefined,
-		rawHtml: descriptionHtml || contentHtml || undefined
-	};
+function firstNonEmpty(...vals: (string | null | undefined)[]) {
+	for (const v of vals) if (v && `${v}`.trim()) return `${v}`.trim();
+	return null;
 }
 
-function fromAtomEntry(en: any): ParsedItem {
-	const title = str(en.title?.['#text'] ?? en.title) || '';
-	const link = pickAtomLink(en.link);
-	const publishedAt = str(en.updated) || str(en.published) || undefined;
-	const summaryHtml = str(en.summary?.['#text'] ?? en.summary);
-	const contentHtml = str(en.content?.['#text'] ?? en.content);
+function normalizeRssItem(raw: unknown, sourceTitle: string | null): FeedItem {
+	const it = (raw ?? {}) as Record<string, unknown>;
 
-	// Atom media namespaces sometimes appear as media:content too
-	const mediaContent = arr(en?.['media:content']).map((m: any) => str(m?.['@_url'] || m?.url));
-	const mediaThumbs = arr(en?.['media:thumbnail']).map((m: any) => str(m?.['@_url'] || m?.url));
-	const imageFromMedia = pickFirst([...mediaContent, ...mediaThumbs].filter(Boolean));
-	const imageFromHtml = pickImageFromHtml(summaryHtml) || pickImageFromHtml(contentHtml);
+	const title = firstNonEmpty(getText(it.title), 'Untitled')!;
 
-	return {
-		title,
-		link,
-		publishedAt,
-		description: summaryHtml || contentHtml || undefined,
-		author: str(en.author?.name ?? en.author) || undefined,
-		imageUrl: imageFromMedia || imageFromHtml || undefined,
-		rawHtml: summaryHtml || contentHtml || undefined
-	};
+	// link via <link> or <guid isPermaLink="true">
+	const guid = it.guid as Record<string, unknown> | undefined;
+	const guidIsPerma = Boolean((guid?.isPermaLink as boolean) ?? false);
+	const link = firstNonEmpty(getText(it.link), guidIsPerma ? getText(guid) : null)!;
+
+	const publishedAt = getText(it.pubDate) ?? getText(it.published) ?? getText(it.updated) ?? null;
+
+	const excerpt = firstNonEmpty(
+		stripTags(getText(it.description) ?? ''),
+		stripTags(getText(it['content:encoded']) ?? '')
+	);
+
+	// images: enclosure, media:content, or content:encoded img
+	const enc = it.enclosure as unknown;
+	let enclosure: string | null = null;
+	if (enc && typeof enc === 'object') {
+		enclosure = ((enc as Record<string, unknown>)?.url as string | undefined) ?? null;
+	} else if (typeof enc === 'string') {
+		enclosure = enc;
+	}
+
+	const mediaContent =
+		((it['media:content'] as Record<string, unknown> | undefined)?.url as string | undefined) ??
+		((it['media:thumbnail'] as Record<string, unknown> | undefined)?.url as string | undefined) ??
+		null;
+
+	const imgFromHtml = findImgSrc(getText(it['content:encoded']) ?? getText(it.description) ?? null);
+
+	const image = firstNonEmpty(enclosure, mediaContent, imgFromHtml);
+
+	return { title, link, publishedAt, excerpt, image, source: sourceTitle };
 }
 
-// helpers
-function pickAtomLink(link: any): string {
-	if (!link) return '';
-	if (typeof link === 'string') return link;
-	const arrL = Array.isArray(link) ? link : [link];
-	const alt = arrL.find((l) => (l['@_rel'] ?? 'alternate') === 'alternate' && !!l['@_href']);
-	return (alt?.['@_href'] ?? arrL[0]?.['@_href'] ?? arrL[0]) || '';
+function normalizeAtomEntry(raw: unknown, sourceTitle: string | null): FeedItem {
+	const it = (raw ?? {}) as Record<string, unknown>;
+
+	const title = firstNonEmpty(getText(it.title), 'Untitled')!;
+
+	// link may be array/object/string
+	let link = '';
+	const linkVal = it.link as unknown;
+
+	if (Array.isArray(linkVal)) {
+		const alt = linkVal.find((l) => (l as Record<string, unknown>)?.rel === 'alternate') as
+			| Record<string, unknown>
+			| undefined;
+		link =
+			(alt?.href as string | undefined) ??
+			((linkVal[0] as Record<string, unknown>)?.href as string | undefined) ??
+			'';
+	} else if (typeof linkVal === 'object' && linkVal) {
+		link =
+			((linkVal as Record<string, unknown>).href as string | undefined) ?? getText(linkVal) ?? '';
+	} else {
+		link = getText(linkVal) ?? '';
+	}
+
+	const publishedAt = getText(it.published) ?? getText(it.updated) ?? null;
+
+	const excerpt = firstNonEmpty(
+		stripTags(getText(it.summary) ?? ''),
+		stripTags(getText(it.content) ?? '')
+	);
+
+	// enclosure can be a link rel="enclosure"
+	let enclosure: string | null = null;
+	if (Array.isArray(linkVal)) {
+		const enc = linkVal.find((l) => (l as Record<string, unknown>)?.rel === 'enclosure') as
+			| Record<string, unknown>
+			| undefined;
+		enclosure = (enc?.href as string | undefined) ?? null;
+	} else if (typeof linkVal === 'object' && linkVal) {
+		const rec = linkVal as Record<string, unknown>;
+		enclosure = (rec.rel === 'enclosure' ? (rec.href as string | undefined) : undefined) ?? null;
+	}
+
+	const mediaContent =
+		((it['media:content'] as Record<string, unknown> | undefined)?.url as string | undefined) ??
+		((it['media:thumbnail'] as Record<string, unknown> | undefined)?.url as string | undefined) ??
+		null;
+
+	const image = firstNonEmpty(enclosure, mediaContent, findImgSrc(getText(it.content)));
+
+	return { title, link, publishedAt, excerpt, image, source: sourceTitle };
 }
 
-function pickImageFromHtml(html?: string): string | null {
+function stripTags(html: string) {
+	return html
+		.replace(/<[^>]+>/g, ' ')
+		.replace(/\s+/g, ' ')
+		.trim();
+}
+
+function findImgSrc(html: string | null | undefined): string | null {
 	if (!html) return null;
-	// simple <img ... src="..."> matcher
 	const m = html.match(/<img[^>]+src=["']([^"']+)["']/i);
 	return m?.[1] ?? null;
-}
-
-function str(v: any): string {
-	if (v == null) return '';
-	if (typeof v === 'string') return v;
-	if (typeof v === 'number') return String(v);
-	if (typeof v === 'object' && typeof v['#text'] === 'string') return v['#text'];
-	return '';
-}
-
-function arr<T>(v: any): T[] {
-	if (!v) return [];
-	return Array.isArray(v) ? v : [v];
-}
-
-function pickFirst<T>(xs: T[]): T | undefined {
-	return xs.length ? xs[0] : undefined;
 }

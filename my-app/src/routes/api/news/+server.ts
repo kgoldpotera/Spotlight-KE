@@ -1,31 +1,100 @@
+// src/routes/api/news/+server.ts
 import type { RequestHandler } from './$types';
 import type { Scope, Category, Article, NewsResponse } from '$lib/types';
-import { KENYA_SOURCES } from '$lib/server/sources/kenya';
-import { GLOBAL_SOURCES } from '$lib/server/sources/global';
-import { fetchFeed } from '$lib/server/rss/fetchFeed';
-import { parseFeed } from '$lib/server/rss/parse';
-import { itemsToArticles } from '$lib/server/rss/normalize';
+
+import { getFeedUrls } from '$lib/server/rss/catalog';
+import { fetchFeed, runLimited } from '$lib/server/rss/fetchFeed';
 import { resolveOgImage } from '$lib/server/enrich/ogImage';
 
-function limitConcurrency<T, R>(items: T[], n: number, fn: (x: T) => Promise<R>) {
-	const queue = [...items];
-	const running: Promise<void>[] = [];
-	const results: R[] = [];
+// ---- helpers ---------------------------------------------------------------
 
-	const run = async () => {
-		const x = queue.shift();
-		if (x == null) return;
-		try {
-			const r = await fn(x);
-			results.push(r as any);
-		} finally {
-			await run();
-		}
-	};
-
-	for (let i = 0; i < Math.min(n, items.length); i++) running.push(run());
-	return Promise.all(running).then(() => results);
+function hostOf(url: string): string {
+	try {
+		return new URL(url).hostname.replace(/^www\./, '');
+	} catch {
+		return url;
+	}
 }
+
+type ParsedItem = {
+	title: string;
+	link: string;
+	publishedAt?: string | null;
+	excerpt?: string | null;
+	image?: string | null;
+	source?: string | null;
+};
+
+function toArticle(it: ParsedItem, originFeedUrl: string): Article {
+	const url = it.link;
+	const srcName = it.source ?? hostOf(originFeedUrl);
+	// Cast to Article to satisfy stricter SourceId typing without touching your types.
+	return {
+		id: `rss:${url}`,
+		source: 'rss' as unknown as Article['source'],
+		sourceName: srcName,
+		title: it.title || 'Untitled',
+		url,
+		image: it.image ?? null,
+		excerpt: it.excerpt ?? null,
+		category: null,
+		publishedAt: it.publishedAt ?? null,
+		author: null
+	} as unknown as Article;
+}
+
+/** images we should treat as placeholders and replace via OG image */
+function isBadOrGoogleThumb(u?: string | null): boolean {
+	if (!u) return true;
+	try {
+		const { hostname, pathname } = new URL(u);
+		if (
+			hostname.endsWith('news.google.com') ||
+			hostname.endsWith('googleusercontent.com') ||
+			hostname.endsWith('gstatic.com') ||
+			hostname.endsWith('google.com')
+		)
+			return true;
+
+		const p = pathname.toLowerCase();
+		if (
+			p.includes('/favicon') ||
+			p.includes('/news_') ||
+			p.includes('/branding') ||
+			p.includes('/static')
+		)
+			return true;
+
+		return false;
+	} catch {
+		return true;
+	}
+}
+
+/** filter out login/subscribe/epaper non-stories */
+function looksLikeLoginOrEpaper(url: string, title?: string | null): boolean {
+	const t = (title || '').toLowerCase();
+	if (/\b(login|sign[\s-]?in|subscribe|e-?paper|user\s*login)\b/i.test(t)) return true;
+
+	try {
+		const u = new URL(url);
+		const path = u.pathname.toLowerCase();
+		const qs = u.search.toLowerCase();
+		if (
+			/(\/login|\/signin|\/account|\/subscribe|\/e-?paper|\/epaper|\/paywall)/.test(path) ||
+			qs.includes('login') ||
+			qs.includes('subscribe')
+		)
+			return true;
+
+		if (u.hostname.includes('accounts.google.com')) return true;
+	} catch {
+		/* ignore */
+	}
+	return false;
+}
+
+// ---------------------------------------------------------------------------
 
 export const GET: RequestHandler = async ({ url, setHeaders }) => {
 	const scope = (url.searchParams.get('scope') as Scope) ?? 'all';
@@ -33,42 +102,78 @@ export const GET: RequestHandler = async ({ url, setHeaders }) => {
 	const page = Math.max(1, Number(url.searchParams.get('page') ?? '1'));
 	const size = Math.min(60, Math.max(1, Number(url.searchParams.get('size') ?? '24')));
 
-	const sources = [...KENYA_SOURCES, ...GLOBAL_SOURCES]
-		.filter((s) => s.active)
-		.filter((s) => (scope === 'all' ? true : s.scope === scope));
+	const kenyaFeeds = getFeedUrls('kenya');
+	const globalFeeds = getFeedUrls('global');
 
-	const batches = await limitConcurrency(sources, 5, async (s) => {
+	const feedUrls =
+		scope === 'kenya'
+			? kenyaFeeds
+			: scope === 'global'
+				? globalFeeds
+				: [...kenyaFeeds, ...globalFeeds];
+
+	// Fetch feeds with limited concurrency; skip broken ones
+	const allArticles: Article[] = [];
+
+	await runLimited(6, feedUrls, async (feedUrl) => {
 		try {
-			const xml = await fetchFeed(s.url, s.ttlMs ?? 300_000);
-			const parsed = parseFeed(xml);
-			const arts = itemsToArticles({ sourceId: s.id, sourceLabel: s.label, parsed });
-			return arts;
-		} catch (e) {
-			console.error('[rss]', s.label, s.url, e);
-			return [] as Article[];
+			const items = (await fetchFeed(feedUrl, 1)) as ParsedItem[]; // 1 retry inside fetcher
+			for (const it of items) {
+				if (!it?.link) continue;
+
+				// drop obvious non-stories (login/epaper)
+				if (looksLikeLoginOrEpaper(it.link, it.title)) continue;
+
+				allArticles.push(toArticle(it, feedUrl));
+			}
+		} catch {
+			// skip bad feeds quietly
 		}
 	});
 
-	const all = ([] as Article[]).concat(...batches);
-
-	// dedupe by URL
+	// Dedupe by URL
 	const byUrl = new Map<string, Article>();
-	for (const a of all) if (a.url && !byUrl.has(a.url)) byUrl.set(a.url, a);
-
+	for (const a of allArticles) {
+		if (!a.url) continue;
+		if (!byUrl.has(a.url)) byUrl.set(a.url, a);
+	}
 	let items = Array.from(byUrl.values());
 
 	if (category) items = items.filter((i) => i.category === category);
 
-	// sort newest → oldest
-	items.sort((a, b) => Date.parse(b.publishedAt) - Date.parse(a.publishedAt));
+	// Sort newest → oldest (missing dates last)
+	items.sort((a, b) => {
+		const da = a.publishedAt ? Date.parse(a.publishedAt) : 0;
+		const db = b.publishedAt ? Date.parse(b.publishedAt) : 0;
+		return db - da;
+	});
 
-	// 🔎 enrich top N items that are missing image
-	const toEnrich = items.filter((i) => !i.image).slice(0, 32);
-	await limitConcurrency(toEnrich, 6, async (it) => {
+	// Replace GN/placeholder thumbs (and missing ones) with OG image for the first N items
+	const toEnrich = items.filter((i) => !i.image || isBadOrGoogleThumb(i.image)).slice(0, 40);
+	await runLimited(8, toEnrich, async (it) => {
 		const img = await resolveOgImage(it.url);
 		if (img) it.image = img;
 	});
 
+	// For Kenyan scope, prefer items with images first, and nudge Capital FM
+	if (scope === 'kenya') {
+		const score = (a: Article): number => {
+			let s = 0;
+			if (a.image) s += 100; // image first
+			try {
+				const h = new URL(a.url).hostname.replace(/^www\./, '');
+				if (h.endsWith('capitalfm.co.ke')) s += 20;
+			} catch {
+				/* ignore */
+			}
+			const ts = a.publishedAt ? Date.parse(a.publishedAt) : 0;
+			// combine: high score dominates, timestamp keeps it recent
+			return s * 1_000_000_000 + ts;
+		};
+		items.sort((a, b) => score(b) - score(a));
+	}
+
+	// Pagination
 	const total = items.length;
 	const start = (page - 1) * size;
 	const paged = items.slice(start, start + size);
@@ -80,7 +185,7 @@ export const GET: RequestHandler = async ({ url, setHeaders }) => {
 	};
 
 	setHeaders({
-		'content-type': 'application/json',
+		'content-type': 'application/json; charset=utf-8',
 		'cache-control':
 			scope === 'global'
 				? 'public, s-maxage=60, stale-while-revalidate=120'
