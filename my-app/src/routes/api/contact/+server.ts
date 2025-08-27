@@ -1,96 +1,105 @@
-// src/routes/api/contact/+server.ts
 import type { RequestHandler } from './$types';
-import { Resend } from 'resend';
-import { env } from '$env/dynamic/private';
+import { RESEND_API_KEY, CONTACT_FROM, CONTACT_TO, PUBLIC_APP_NAME } from '$env/static/private';
 
-function esc(s: string) {
-	return s
-		.replaceAll('&', '&amp;')
-		.replaceAll('<', '&lt;')
-		.replaceAll('>', '&gt;')
-		.replaceAll('"', '&quot;')
-		.replaceAll("'", '&#039;');
-}
+// Lightweight email validator
+const emailRx = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export const POST: RequestHandler = async ({ request }) => {
-	const ct = request.headers.get('content-type') ?? '';
-	let payload: Record<string, string> = {};
-	if (ct.includes('form')) {
-		const fd = await request.formData();
-		if ((fd.get('company') as string)?.trim())
-			return new Response(JSON.stringify({ ok: true }), { status: 200 });
-		payload = {
-			name: (fd.get('name') as string) ?? '',
-			email: (fd.get('email') as string) ?? '',
-			subject: (fd.get('subject') as string) ?? '',
-			message: (fd.get('message') as string) ?? '',
-			consent: (fd.get('consent') as string) ?? ''
-		};
-	} else {
-		payload = (await request.json().catch(() => ({}))) as any;
-	}
+	const form = await request.formData();
 
-	const { name = '', email = '', subject = '', message = '', consent = '' } = payload;
-	if (
-		name.length < 2 ||
-		!email.includes('@') ||
-		!subject ||
-		subject.length > 140 ||
-		!message ||
-		consent !== 'on'
-	) {
-		return new Response(JSON.stringify({ error: 'Invalid input' }), { status: 400 });
-	}
-
-	const key = env.RESEND_API_KEY;
-	const from = env.CONTACT_FROM;
-	const to = (env.CONTACT_TO ?? '')
-		.split(',')
-		.map((s) => s.trim())
-		.filter(Boolean);
-
-	// If not configured yet, don’t hard-fail during dev:
-	if (!key || !from || !to.length) {
-		console.log('[contact:dev-fallback]', {
-			from,
-			to,
-			name,
-			email,
-			subject,
-			snippet: message.slice(0, 120)
-		});
-		return new Response(JSON.stringify({ ok: true, note: 'Email not configured (dev fallback)' }), {
-			status: 200
+	// Honeypot (if filled, silently succeed)
+	const company = (form.get('company') as string | null)?.trim() ?? '';
+	if (company) {
+		return new Response(JSON.stringify({ ok: true }), {
+			status: 200,
+			headers: { 'content-type': 'application/json' }
 		});
 	}
 
-	const resend = new Resend(key);
+	const name = (form.get('name') as string | null)?.trim() ?? '';
+	const email = (form.get('email') as string | null)?.trim() ?? '';
+	const subject = (form.get('subject') as string | null)?.trim() ?? '';
+	const message = (form.get('message') as string | null)?.trim() ?? '';
+	const consent = (form.get('consent') as string | null) !== null;
+
+	// Basic validation (mirror your form constraints)
+	if (name.length < 2 || name.length > 120) return jsonBad('Please enter your full name.');
+	if (!emailRx.test(email)) return jsonBad('Please enter a valid email address.');
+	if (!subject || subject.length > 140) return jsonBad('Please enter a subject (≤ 140 chars).');
+	if (!message || message.length < 10) return jsonBad('Please write a message (≥ 10 chars).');
+	if (!consent) return jsonBad('Consent is required.');
+
+	// Build email
+	const app = PUBLIC_APP_NAME || 'SPOTLIGHT-KE';
+	const from = CONTACT_FROM || 'onboarding@resend.dev'; // fallback for dev/testing
+	const to = CONTACT_TO || 'koechmanoah32@gmail.com';
+
 	const html = `
-    <div style="font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; line-height:1.5;">
-      <h2>New Contact Request</h2>
-      <p><strong>Name:</strong> ${esc(name)}</p>
-      <p><strong>Email:</strong> ${esc(email)}</p>
-      <p><strong>Subject:</strong> ${esc(subject)}</p>
-      <p><strong>Message:</strong></p>
-      <pre style="white-space: pre-wrap; background:#f6f6f6; padding:12px; border-radius:8px;">${esc(message)}</pre>
-    </div>
-  `;
-	const text = `New Contact Request
+		<h2>New contact from ${app}</h2>
+		<p><strong>Name:</strong> ${escapeHtml(name)}</p>
+		<p><strong>Email:</strong> ${escapeHtml(email)}</p>
+		<p><strong>Subject:</strong> ${escapeHtml(subject)}</p>
+		<p><strong>Consent:</strong> ${consent ? 'Yes' : 'No'}</p>
+		<hr />
+		<pre style="white-space:pre-wrap;font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
+${escapeHtml(message)}
+		</pre>
+	`;
+
+	const payload = {
+		from,
+		to,
+		reply_to: email,
+		subject: `[${app}] ${subject}`,
+		text: `New contact on ${app}
+
 Name: ${name}
 Email: ${email}
 Subject: ${subject}
+Consent: ${consent ? 'Yes' : 'No'}
 
 ${message}
-`;
+`,
+		html
+	};
 
-	await resend.emails.send({
-		from,
-		to,
-		subject: `Contact • ${subject}`,
-		html,
-		text,
-		reply_to: email
+	// Send via Resend HTTP API
+	const r = await fetch('https://api.resend.com/emails', {
+		method: 'POST',
+		headers: {
+			Authorization: `Bearer ${RESEND_API_KEY}`,
+			'Content-Type': 'application/json'
+		},
+		body: JSON.stringify(payload)
 	});
 
-	return new Response(JSON.stringify({ ok: true }), { status: 200 });
+	if (!r.ok) {
+		const err = await r.json().catch(() => ({}));
+		return new Response(JSON.stringify({ error: err?.message || 'Send failed' }), {
+			status: 500,
+			headers: { 'content-type': 'application/json' }
+		});
+	}
+
+	return new Response(JSON.stringify({ ok: true }), {
+		status: 200,
+		headers: { 'content-type': 'application/json' }
+	});
 };
+
+// Helpers
+function jsonBad(msg: string) {
+	return new Response(JSON.stringify({ error: msg }), {
+		status: 400,
+		headers: { 'content-type': 'application/json' }
+	});
+}
+
+function escapeHtml(s: string) {
+	return s
+		.replace(/&/g, '&amp;')
+		.replace(/</g, '&lt;')
+		.replace(/>/g, '&gt;')
+		.replace(/"/g, '&quot;')
+		.replace(/'/g, '&#39;');
+}
