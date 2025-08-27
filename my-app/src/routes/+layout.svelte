@@ -2,6 +2,7 @@
   import Header from '$lib/ui/Header.svelte';
   import Footer from '$lib/ui/Footer.svelte';
   import '../styles/app.css';
+  import '../styles/tw-shim.css';
 </script>
 
 <div class="min-h-screen flex flex-col">

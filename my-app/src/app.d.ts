@@ -1,8 +1,13 @@
 // src/app.d.ts
-// See https://kit.svelte.dev/docs/types#app
-declare namespace App {
-	interface Locals {
-		flags: { enableX: boolean };
+// Make this file a module.
+export {};
+
+declare global {
+	namespace App {
+		interface Locals {
+			flags?: {
+				enableX?: boolean;
+			};
+		}
 	}
 }
-export {};

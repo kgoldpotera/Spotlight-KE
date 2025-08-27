@@ -1,40 +1,83 @@
 <script lang="ts">
   import Hero from '$lib/ui/Hero.svelte';
   import ArticleCard from '$lib/ui/ArticleCard.svelte';
-  import AdCard from '$lib/ui/AdCard.svelte';
-  // using 'any' here keeps the template simple
-  export let data: { lead: any; rightRail: any[]; main: any[]; fetchedAt: number };
+  import type { Article } from '$lib/types';
+
+  type Kind = 'rss' | 'x';
+  type A = Article & { origin?: Kind };
+
+  // from +page.server.ts
+  export let data: {
+    lead?: A;
+    rightRail: A[];
+    main: A[];
+    fetchedAt: number;
+  };
 </script>
 
-<section class="mx-auto max-w-6xl px-4 py-8">
-  <h1 class="text-3xl font-semibold tracking-tight">SPOTLIGHT-KE</h1>
-  <p class="opacity-80 mt-1">Kenya’s news—fast, clean, and reliable.</p>
+<section class="container">
+  <!-- ABOVE THE FOLD -->
+  <div class="above-fold">
+    {#if data.lead}
+      <Hero item={data.lead} />
+    {/if}
 
-  <!-- Top row: 3/4 lead (Kenya) + 1/4 right rail -->
-  <div class="mt-6 grid gap-6 lg:grid-cols-4">
-    <div class="lg:col-span-3">
-      {#if data.lead}
-        <Hero item={data.lead} />
-      {/if}
-    </div>
-
-    <aside class="lg:col-span-1 flex flex-col gap-4">
-      {#each data.rightRail as item (item.id)}
-        <ArticleCard {item} variant="compact" />
+    <aside class="rail">
+      {#each data.rightRail as it (it.url)}
+        <ArticleCard item={it} variant="rail" />
       {/each}
-      <!-- Optional ad in the right rail -->
-      <AdCard label="Sponsored" />
+
+      <!-- Ad slot (keep as a link, but give it a valid URL to satisfy a11y) -->
+      <a class="ad-card" href="/sponsored" rel="nofollow noopener" aria-label="Sponsored">
+        <small>Sponsored — 300×250 / responsive</small>
+      </a>
     </aside>
   </div>
 
-  <!-- Main stream: remaining Kenya first, then Global, with ad slots -->
-  <div class="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-    {#each data.main as item (item.id ?? item.label)}
-      {#if item.kind === 'ad'}
-        <AdCard label={item.label ?? 'Sponsored'} />
-      {:else}
-        <ArticleCard item={item} />
-      {/if}
+  <!-- MAIN STREAM -->
+  <div class="cards-grid">
+    {#each data.main as item (item.url)}
+      <ArticleCard item={item} />
     {/each}
   </div>
 </section>
+
+<style>
+  .container { max-width: 1120px; margin: 0 auto; padding: 24px; }
+
+  .above-fold {
+    display: grid;
+    grid-template-columns: 2fr 1fr; /* big hero left, rail right */
+    gap: 24px;
+    align-items: start;
+  }
+
+  .rail { display: grid; gap: 12px; }
+
+  .ad-card {
+    display: grid; place-items: center;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+    text-decoration: none;
+    color: inherit;
+    background: var(--background-alt);
+    opacity: .9;
+  }
+  .ad-card:hover { opacity: 1; }
+
+  .cards-grid {
+    margin-top: 28px;
+    display: grid;
+    gap: 16px;
+    grid-template-columns: repeat(3, 1fr);
+  }
+
+  @media (max-width: 980px) {
+    .above-fold { grid-template-columns: 1fr; }
+    .cards-grid { grid-template-columns: repeat(2, 1fr); }
+  }
+  @media (max-width: 620px) {
+    .cards-grid { grid-template-columns: 1fr; }
+  }
+</style>
