@@ -1,5 +1,8 @@
 import type { RequestHandler } from './$types';
-import { RESEND_API_KEY, CONTACT_FROM, CONTACT_TO, PUBLIC_APP_NAME } from '$env/static/private';
+
+import { RESEND_API_KEY, CONTACT_FROM, CONTACT_TO } from '$env/static/private';
+import { PUBLIC_APP_NAME } from '$env/static/public';
+
 
 // Lightweight email validator
 const emailRx = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
