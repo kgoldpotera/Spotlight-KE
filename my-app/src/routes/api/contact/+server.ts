@@ -1,8 +1,8 @@
+// src/routes/api/contact/+server.ts
 import type { RequestHandler } from './$types';
 
 import { RESEND_API_KEY, CONTACT_FROM, CONTACT_TO } from '$env/static/private';
-import { PUBLIC_APP_NAME } from '$env/static/public';
-
+import { env as publicEnv } from '$env/dynamic/public'; // ✅ dynamic public env
 
 // Lightweight email validator
 const emailRx = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -13,10 +13,7 @@ export const POST: RequestHandler = async ({ request }) => {
 	// Honeypot (if filled, silently succeed)
 	const company = (form.get('company') as string | null)?.trim() ?? '';
 	if (company) {
-		return new Response(JSON.stringify({ ok: true }), {
-			status: 200,
-			headers: { 'content-type': 'application/json' }
-		});
+		return jsonOk();
 	}
 
 	const name = (form.get('name') as string | null)?.trim() ?? '';
@@ -25,7 +22,7 @@ export const POST: RequestHandler = async ({ request }) => {
 	const message = (form.get('message') as string | null)?.trim() ?? '';
 	const consent = (form.get('consent') as string | null) !== null;
 
-	// Basic validation (mirror your form constraints)
+	// Basic validation
 	if (name.length < 2 || name.length > 120) return jsonBad('Please enter your full name.');
 	if (!emailRx.test(email)) return jsonBad('Please enter a valid email address.');
 	if (!subject || subject.length > 140) return jsonBad('Please enter a subject (≤ 140 chars).');
@@ -33,12 +30,12 @@ export const POST: RequestHandler = async ({ request }) => {
 	if (!consent) return jsonBad('Consent is required.');
 
 	// Build email
-	const app = PUBLIC_APP_NAME || 'SPOTLIGHT-KE';
-	const from = CONTACT_FROM || 'onboarding@resend.dev'; // fallback for dev/testing
+	const app = publicEnv.PUBLIC_APP_NAME ?? 'SPOTLIGHT-KE'; // ✅ no static export needed
+	const from = CONTACT_FROM || 'onboarding@resend.dev'; // use a verified sender in prod
 	const to = CONTACT_TO || 'koechmanoah32@gmail.com';
 
 	const html = `
-		<h2>New contact from ${app}</h2>
+		<h2>New contact from ${escapeHtml(app)}</h2>
 		<p><strong>Name:</strong> ${escapeHtml(name)}</p>
 		<p><strong>Email:</strong> ${escapeHtml(email)}</p>
 		<p><strong>Subject:</strong> ${escapeHtml(subject)}</p>
@@ -66,7 +63,6 @@ ${message}
 		html
 	};
 
-	// Send via Resend HTTP API
 	const r = await fetch('https://api.resend.com/emails', {
 		method: 'POST',
 		headers: {
@@ -84,20 +80,22 @@ ${message}
 		});
 	}
 
+	return jsonOk();
+};
+
+// Helpers
+function jsonOk() {
 	return new Response(JSON.stringify({ ok: true }), {
 		status: 200,
 		headers: { 'content-type': 'application/json' }
 	});
-};
-
-// Helpers
+}
 function jsonBad(msg: string) {
 	return new Response(JSON.stringify({ error: msg }), {
 		status: 400,
 		headers: { 'content-type': 'application/json' }
 	});
 }
-
 function escapeHtml(s: string) {
 	return s
 		.replace(/&/g, '&amp;')
